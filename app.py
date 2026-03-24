@@ -2,10 +2,15 @@ from fastapi import FastAPI, Depends, Header, HTTPException, status
 from book_inventory import Library
 from pydantic import BaseModel, Field
 from typing import Optional
-
+from jose import jwt, JWTError
+import os
 
 
 app = FastAPI(title="Books API (RBAC v1)")
+
+JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-change-me")
+JWT_ALG = "HS256"
+ALLOWED_ROLES = {"user", "admin"}
 
 LIB_PATH = "books.json"
 lib = Library()
@@ -20,18 +25,51 @@ class BookIn(BaseModel):
     genre: str = Field(..., min_length=1)
 
 async def get_auth_context(
-        x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
-        x_role: Optional[str] = Header(default=None, alias="X-Role")
-        ,) -> AuthContext:
-    if not x_role:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing role")
-    role = x_role.strip().lower()
-    if role not in {"user", "admin"}:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden role")
-     
-    return AuthContext(user_id=x_user_id, role=role)
+        authorization: Optional[str] = Header(default=None, alias="Authorization"),
+        #after the above, authorization = Bearer ey....
+    ) -> AuthContext:
+    
+    #Checking if authorization header contains any data at all
+    if not authorization:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing or invalid Authorization header")
+    
+    #Checking if 
+    authorization = authorization.strip()
+    if not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing or invalid Authorization header")
+    
+    token = authorization.split(" ", 1)[1]
+
+    try:
+        claims = jwt.decode(
+            token,
+            JWT_SECRET,
+            algorithms=[JWT_ALG],
+        )
+    except JWTError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
+    
+
+    #Extract claims
+    user_id = claims.get("sub")
+    roles = claims.get("roles")
+
+    if not roles or not isinstance(roles, list):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+    
+    roles_normalized = {r.strip().lower() for r in roles}
+
+    if "admin" in roles_normalized:
+        role = "admin"
+    elif "user" in roles_normalized:
+        role = "user"
+    else:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+    
+    return AuthContext(user_id=user_id, role=role)
 
 def require_role(*allowed_roles: str):
+
     async def checker(ctx: AuthContext = Depends(get_auth_context)) -> AuthContext:
         if ctx.role not in allowed_roles:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
